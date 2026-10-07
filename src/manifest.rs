@@ -45,6 +45,17 @@ pub struct PayloadSpec {
     pub source_is_dir: bool,
 }
 
+/// Slice of the payload carried by one part of a split archive.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PartSpec {
+    /// Zero-based part index.
+    pub index: u16,
+    /// Byte offset of this slice inside the compressed payload.
+    pub payload_offset: u64,
+    /// Length of this slice.
+    pub payload_len: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
     pub version: u32,
@@ -53,6 +64,8 @@ pub struct Manifest {
     pub video: VideoSpec,
     pub payload: PayloadSpec,
     pub frame_crc: Vec<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<PartSpec>,
 }
 
 const MAGIC: &[u8; 4] = b"VARC";
@@ -109,6 +122,17 @@ impl Manifest {
         }
         let crc = crc32fast::hash(&b);
         b.extend_from_slice(&crc.to_le_bytes());
+        if let Some(p) = &self.part {
+            let mut t = Vec::with_capacity(24);
+            t.extend_from_slice(b"VPT1");
+            t.extend_from_slice(&p.index.to_le_bytes());
+            t.extend_from_slice(&0u16.to_le_bytes());
+            t.extend_from_slice(&p.payload_offset.to_le_bytes());
+            t.extend_from_slice(&p.payload_len.to_le_bytes());
+            let tcrc = crc32fast::hash(&t);
+            b.extend_from_slice(&t);
+            b.extend_from_slice(&tcrc.to_le_bytes());
+        }
         b
     }
 
@@ -176,6 +200,20 @@ impl Manifest {
         if got != want {
             bail!("manifest crc32 mismatch (got {got:08x}, want {want:08x})");
         }
+        // optional split-part trailer after the main crc (ignored by old readers)
+        let mut part = None;
+        let rest = &data[r.p..];
+        if rest.len() >= 28 && &rest[..4] == b"VPT1" {
+            let tcrc = u32::from_le_bytes(rest[24..28].try_into().unwrap());
+            if crc32fast::hash(&rest[..24]) != tcrc {
+                bail!("manifest part trailer crc32 mismatch");
+            }
+            part = Some(PartSpec {
+                index: u16::from_le_bytes(rest[4..6].try_into().unwrap()),
+                payload_offset: u64::from_le_bytes(rest[8..16].try_into().unwrap()),
+                payload_len: u64::from_le_bytes(rest[16..24].try_into().unwrap()),
+            });
+        }
         Ok(Manifest {
             version: 1,
             grid,
@@ -183,6 +221,7 @@ impl Manifest {
             video,
             payload,
             frame_crc,
+            part,
         })
     }
 }
@@ -261,6 +300,7 @@ mod tests {
             frame_crc: (0..416u32)
                 .map(|i| (i.wrapping_mul(2654435761) >> 16) as u16)
                 .collect(),
+            part: None,
         }
     }
 
@@ -288,5 +328,34 @@ mod tests {
         b.extend_from_slice(&[0x13, 0x37, 0x00, 0xff]);
         let back = Manifest::from_bytes(&b).unwrap();
         assert_eq!(m, back);
+        assert!(back.part.is_none());
+    }
+
+    #[test]
+    fn part_trailer_roundtrip() {
+        let mut m = sample();
+        m.part = Some(PartSpec {
+            index: 3,
+            payload_offset: 123_456,
+            payload_len: 7890,
+        });
+        let b = m.to_bytes();
+        let back = Manifest::from_bytes(&b).unwrap();
+        assert_eq!(m, back);
+        assert_eq!(back.part.unwrap().index, 3);
+    }
+
+    #[test]
+    fn detects_part_trailer_corruption() {
+        let mut m = sample();
+        m.part = Some(PartSpec {
+            index: 1,
+            payload_offset: 10,
+            payload_len: 20,
+        });
+        let mut b = m.to_bytes();
+        let n = b.len();
+        b[n - 5] ^= 0xff; // inside the trailer body
+        assert!(Manifest::from_bytes(&b).is_err());
     }
 }

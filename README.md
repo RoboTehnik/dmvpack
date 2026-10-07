@@ -1,6 +1,8 @@
-# vidarc
+# dmvpack
 
-**Версия 1.0.0** · Copyright 2026 Vladimir Sirenko \<vmsirenko@gmail.com\>
+**Data Matrix Video Packer** — архиватор в чёрно-белое видео.
+
+**Версия 1.1.0** · Copyright 2026 Vladimir Sirenko \<vmsirenko@gmail.com\>
 
 Архиватор, который упаковывает файлы и каталоги в чёрно-белое видео (ровно **1 бит на ячейку**) и
 обратно извлекает их. Записанный mp4 можно заливать на видеохостинг: при повторном кодировании
@@ -29,7 +31,8 @@
 
 **5. Аудио (манифест).** Имена, размеры, sha256 и crc32 файлов, параметры видео — модулируются
 **FSK: 1200 бод**, тоны 1200/2400 Гц, моно 48 kHz, амплитуда 0.65, 50 мс пауза между копиями,
-преамбула из 256 бит `sha256("vidarc-preamble-v1")`. Копий манифеста **до 16, минимум 2**
+преамбула из 256 бит `sha256("vidarc-preamble-v1")` (историческая константа формата).
+Копий манифеста **до 16, минимум 2**
 гарантируются даже для крошечного архива (длительность аудио не короче видео). Демодулятор
 сначала жёстко ищет все прохождения преамбулы, затем мягко комбинирует копии бит в бит
 (по сумме энергий), поэтому пережатое аудио вплоть до AAC ~48 kbps читается без потерь.
@@ -57,10 +60,15 @@
 
 ```bash
 # запаковать каталог (или файл) в видео
-vidarc pack mydata/ -o mydata.mp4
+dmvpack pack mydata/ -o mydata.mp4
 
 # распаковать обратно
-vidarc unpack mydata.mp4 -o restored/
+dmvpack unpack mydata.mp4 -o restored/
+
+# разбить на части по500 МБ (каждая часть — самостоятельное видео)
+dmvpack pack mydata/ -o mydata.mp4 --max-part-size 500M
+# → mydata.part1.mp4, mydata.part2.mp4, ...
+dmvpack unpack mydata.part1.mp4 mydata.part2.mp4 mydata.part3.mp4 -o restored/
 ```
 
 Опции `pack`:
@@ -74,10 +82,29 @@ vidarc unpack mydata.mp4 -o restored/
 | `--crf` | 16 | качество x264 (ниже = лучше) |
 | `--preset` | medium | пресет x264 |
 | `--group`, `--parity` | 4, 1 | кадров в RS-группе / кадров паритета |
+| `--max-part-size` | — | разбить выход на части не больше этого размера (`500M`, `1G`, байты) |
 | `--dump-manifest` | — | выгрузить манифест в JSON (отладка) |
 
-`unpack`: `-o/--outdir` (по умолчанию `.`), `-m/--manifest` — читать манифест из JSON
-вместо звуковой дорожки.
+`unpack`: принимает **один или несколько** mp4 (все части архива), `-o/--outdir`
+(по умолчанию `.`), `-m/--manifest` — читать манифест из JSON вместо звуковой
+дорожки (только для одного файла).
+
+## Разбиение на части
+
+Видеоархив получается в ~2.5–7 раз больше исходника (запакованные данные
+несжимаемы x264). `--max-part-size` режет полезную нагрузку на части, каждая из
+которых — **независимое видео со своим манифестом в аудио**:
+
+- имена: `<output>.part1.mp4`, `.part2.mp4`, …; если всё влезло в одну часть —
+  файл называется просто `<output>.mp4`;
+- лимит жёсткий: часть, не влезшая в лимит, пересобирается с меньшей
+  нагрузкой (фактическое соотношение размеров зависит от `--crf` и содержимого);
+- порядок и полнота частей проверяются по манифестам, **имена файлов не
+  важны** — хостинги переименовывают скачанные файлы (VK Video выдаёт
+  `18466093402805.mp4`);
+- пропуск части диагностируется явно: `part 2 is missing (have parts 0, 1, 3)`;
+- каждую часть можно заливать на видеохостинг отдельно; скачав все,
+  передайте их в `unpack` в любом порядке.
 
 Требуется `ffmpeg` и `ffprobe` в PATH (в Windows — `ffmpeg.exe`, `ffprobe.exe`).
 
@@ -85,7 +112,7 @@ vidarc unpack mydata.mp4 -o restored/
 
 ```bash
 cargo build --release            # Linux
-cargo test --release             #10 тестов (+1 ignored — ручной диаг)
+cargo test --release             #14 тестов (+1 ignored — ручной диаг)
 cargo clippy --all-targets && cargo fmt --check
 ```
 
@@ -96,10 +123,10 @@ rustup target add x86_64-pc-windows-gnu   # std уже поставляется 
 # mingw-w64: binutils-mingw-w64-x86-64, mingw-w64-x86-64-dev,
 #            gcc-mingw-w64-x86-64-posix (+base, +posix-runtime), mingw-w64-common
 cargo build --release --target x86_64-pc-windows-gnu
-# результат: target/x86_64-pc-windows-gnu/release/vidarc.exe
+# результат: target/x86_64-pc-windows-gnu/release/dmvpack.exe
 ```
 
-Готовые бинарники лежат в `dist/`: `vidarc-linux-x86_64`, `vidarc-windows-x86_64.exe`.
+Готовые бинарники лежат в `dist/`: `dmvpack-linux-x86_64`, `dmvpack-windows-x86_64.exe`.
 
 ## Структура кода
 
@@ -117,9 +144,9 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 ## Отладочные переменные окружения
 
-- `VIDARC_DEBUG` — ход поиска манифеста и выравнивания;
-- `VIDARC_RS_DEBUG` — статистика внутреннего RS;
-- `VIDARC_DIAG_PCM`, `VIDARC_DIAG_REF` — сброс PCM/эталона для ручного теста `audio_damage`.
+- `DMVPACK_DEBUG` — ход поиска манифеста и выравнивания;
+- `DMVPACK_RS_DEBUG` — статистика внутреннего RS;
+- `DMVPACK_DIAG_PCM`, `DMVPACK_DIAG_REF` — сброс PCM/эталона для ручного теста `audio_damage`.
 
 ## Ограничения
 

@@ -283,7 +283,7 @@ fn find_candidates(x: &[f32]) -> Vec<usize> {
     let mut chosen: Vec<usize> = clusters.iter().take(64).map(|c| c.1).collect();
     chosen.sort_unstable();
 
-    if std::env::var("VIDARC_DEBUG").is_ok() {
+    if std::env::var("DMVPACK_DEBUG").is_ok() {
         eprintln!(
             "candidates: {chosen:?} (refined {nref}, clusters {})",
             clusters.len()
@@ -435,7 +435,7 @@ fn combine_once(
 /// audio track), combine the copies. Candidates that show RS structure are
 /// tried as anchors first.
 fn try_combine(x: &[f32], candidates: &[usize], t: &ToneTables) -> Option<Manifest> {
-    let dbg = std::env::var("VIDARC_DEBUG").is_ok();
+    let dbg = std::env::var("DMVPACK_DEBUG").is_ok();
     if candidates.len() < 2 {
         if dbg {
             eprintln!("combine: only {} candidate(s)", candidates.len());
@@ -477,7 +477,7 @@ pub fn demodulate(pcm: &[i16]) -> Result<Manifest> {
         if let Some(m) = try_decode_stream(&bytes) {
             return Ok(m);
         }
-        if std::env::var("VIDARC_DEBUG").is_ok() {
+        if std::env::var("DMVPACK_DEBUG").is_ok() {
             let b = &bytes[PREAMBLE_BITS / 8..];
             let nblocks = b.len() / inner::CW;
             let st: Vec<bool> = (0..nblocks)
@@ -529,6 +529,7 @@ mod tests {
             frame_crc: (0..416u32)
                 .map(|i| (i.wrapping_mul(2654435761) >> 16) as u16)
                 .collect(),
+            part: None,
         }
     }
 
@@ -569,13 +570,13 @@ mod tests {
 
     /// Manual diagnostic: per-block error counts of an FSK stream against
     /// the reference coded blob. Run with:
-    /// `VIDARC_DIAG_PCM=<raw.s16le> VIDARC_DIAG_REF=<ref.mp4> \
+    /// `DMVPACK_DIAG_PCM=<raw.s16le> DMVPACK_DIAG_REF=<ref.mp4> \
     ///  cargo test --release audio_damage -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn audio_damage() {
-        let pcm_path = std::env::var("VIDARC_DIAG_PCM").expect("VIDARC_DIAG_PCM");
-        let ref_path = std::env::var("VIDARC_DIAG_REF").expect("VIDARC_DIAG_REF");
+        let pcm_path = std::env::var("DMVPACK_DIAG_PCM").expect("DMVPACK_DIAG_PCM");
+        let ref_path = std::env::var("DMVPACK_DIAG_REF").expect("DMVPACK_DIAG_REF");
         let raw = std::fs::read(&pcm_path).unwrap();
         let pcm: Vec<i16> = raw
             .as_chunks::<2>()

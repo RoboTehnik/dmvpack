@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "vidarc",
+    name = "dmvpack",
     version,
     about = "Pack files into a black-and-white video that survives re-encoding",
     after_help = "Copyright 2026 Vladimir Sirenko <vmsirenko@gmail.com>"
@@ -59,11 +59,16 @@ enum Cmd {
         /// Also write the manifest as JSON to this path (debugging aid)
         #[arg(long)]
         dump_manifest: Option<PathBuf>,
+        /// Split the output into parts of at most this size (e.g. 500M, 1G)
+        #[arg(long)]
+        max_part_size: Option<String>,
     },
-    /// Decode .mp4 (manifest read from the audio track) back to the original
+    /// Decode .mp4 (manifest read from the audio track) back to the original;
+    /// pass every part file if packed with --max-part-size
     Unpack {
-        /// Video produced by `pack`
-        video: PathBuf,
+        /// Video(s) produced by `pack`
+        #[arg(required = true)]
+        video: Vec<PathBuf>,
         /// Read the manifest from this JSON file instead of the audio track
         #[arg(short, long)]
         manifest: Option<PathBuf>,
@@ -88,6 +93,7 @@ fn main() -> Result<()> {
             parity,
             preset,
             dump_manifest,
+            max_part_size,
         } => pack::run(pack::PackOpts {
             input,
             output,
@@ -100,13 +106,14 @@ fn main() -> Result<()> {
             parity,
             preset,
             dump_manifest,
+            max_part_size,
         }),
         Cmd::Unpack {
             video,
             manifest,
             outdir,
         } => unpack::run(unpack::UnpackOpts {
-            video,
+            videos: video,
             manifest,
             outdir,
         }),

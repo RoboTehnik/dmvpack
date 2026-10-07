@@ -2,12 +2,12 @@ use crate::ecc;
 use crate::ffmpeg;
 use crate::frame::{find_alignment, payload_bytes, Sampler};
 use crate::inner;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, PartSpec};
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -68,37 +68,43 @@ fn find_time_offset(video_crc: &[Option<u16>], orig: &[u16]) -> (i64, f64) {
 }
 
 pub struct UnpackOpts {
-    pub video: PathBuf,
+    /// One video per part (a single file for an unsplit archive).
+    pub videos: Vec<PathBuf>,
     pub manifest: Option<PathBuf>,
     pub outdir: PathBuf,
 }
 
-pub fn run(o: UnpackOpts) -> Result<()> {
-    ffmpeg::check_video(&o.video)?;
-    let man = match &o.manifest {
+/// Recover the manifest of one video: from JSON (override) or its audio track.
+fn read_manifest(video: &Path, manifest_override: Option<&Path>) -> Result<Manifest> {
+    ffmpeg::check_video(video)?;
+    match manifest_override {
         Some(p) => {
             eprintln!("manifest override: {}", p.display());
-            Manifest::load(p)?
+            Manifest::load(p)
         }
         None => {
             let t0 = std::time::Instant::now();
-            let pcm = ffmpeg::extract_audio_pcm(&o.video)?;
+            let pcm = ffmpeg::extract_audio_pcm(video)?;
             eprintln!(
                 "  audio: {} samples ({:.1}s) [{:.1}s]",
                 pcm.len(),
                 pcm.len() as f64 / crate::audio::SAMPLE_RATE as f64,
                 t0.elapsed().as_secs_f64()
             );
-            let blob = crate::audio::demodulate(&pcm)?;
+            let man = crate::audio::demodulate(&pcm)?;
             eprintln!(
                 "  manifest recovered from audio ({} bytes) [{:.1}s]",
-                blob.to_bytes().len(),
+                man.to_bytes().len(),
                 t0.elapsed().as_secs_f64()
             );
-            blob
+            Ok(man)
         }
-    };
-    let (gw, gh) = ffmpeg::probe_size(&o.video)?;
+    }
+}
+
+/// Decode one video into its slice of the compressed payload.
+fn decode_payload(video: &Path, man: &Manifest) -> Result<Vec<u8>> {
+    let (gw, gh) = ffmpeg::probe_size(video)?;
     let g = man.grid;
     let (ncw, data_len) = inner::check_frame_layout(payload_bytes(&g))?;
     if man.ecc.shard_bytes != data_len {
@@ -111,13 +117,18 @@ pub fn run(o: UnpackOpts) -> Result<()> {
     let group = man.ecc.group_frames;
     let df = man.ecc.data_frames();
     let e = man.frame_crc.len();
+    let slice_len = man
+        .part
+        .map(|p| p.payload_len)
+        .unwrap_or(man.payload.compressed_len) as usize;
     eprintln!(
-        "video {} ({}x{}), expecting {} frames, {} bytes/frame",
-        o.video.display(),
+        "video {} ({}x{}), expecting {} frames, {} bytes/frame, {} payload bytes",
+        video.display(),
         gw,
         gh,
         e,
-        man.ecc.shard_bytes
+        man.ecc.shard_bytes,
+        slice_len
     );
 
     // ---- pass A: per-frame CRCs over the whole video ----
@@ -127,7 +138,7 @@ pub fn run(o: UnpackOpts) -> Result<()> {
     let mut inner_ok = 0usize;
     let mut tried = 0usize;
     {
-        let mut rd = ffmpeg::FrameReader::open(&o.video, gw, gh)?;
+        let mut rd = ffmpeg::FrameReader::open(video, gw, gh)?;
         while let Some(img) = rd.next_frame()? {
             if alignment.is_none() && tried < 5 {
                 let (ox, oy, score) = find_alignment(&g, &img, gw, gh);
@@ -186,7 +197,7 @@ pub fn run(o: UnpackOpts) -> Result<()> {
     let mut outside = 0usize;
     {
         let sampler = Sampler::new(g, gw, gh, ox, oy);
-        let mut rd = ffmpeg::FrameReader::open(&o.video, gw, gh)?;
+        let mut rd = ffmpeg::FrameReader::open(video, gw, gh)?;
         let mut j: i64 = 0;
         while let Some(img) = rd.next_frame()? {
             let i = j + t;
@@ -213,7 +224,7 @@ pub fn run(o: UnpackOpts) -> Result<()> {
     );
 
     // ---- RS repair + concatenation ----
-    let mut data = Vec::with_capacity(man.payload.compressed_len as usize);
+    let mut data = Vec::with_capacity(slice_len);
     for (gi, group_shards) in shards.iter_mut().enumerate() {
         let missing = group_shards.iter().filter(|s| !s.1).count();
         if missing > 0 {
@@ -224,7 +235,124 @@ pub fn run(o: UnpackOpts) -> Result<()> {
             data.extend_from_slice(&s.0);
         }
     }
-    data.truncate(man.payload.compressed_len as usize);
+    if data.len() < slice_len {
+        bail!(
+            "part payload short: assembled {} bytes, need {}",
+            data.len(),
+            slice_len
+        );
+    }
+    data.truncate(slice_len);
+    Ok(data)
+}
+
+/// Check that every part describes the same archive.
+/// Returns video indices ordered by part index.
+fn check_parts(mans: &[Manifest], videos: &[PathBuf]) -> Result<Vec<usize>> {
+    let base = &mans[0];
+    for (m, v) in mans.iter().zip(videos) {
+        if m.payload.raw_sha256 != base.payload.raw_sha256
+            || m.payload.raw_len != base.payload.raw_len
+            || m.payload.compressed_len != base.payload.compressed_len
+            || m.payload.source_name != base.payload.source_name
+            || m.payload.source_is_dir != base.payload.source_is_dir
+            || m.grid != base.grid
+            || m.ecc != base.ecc
+        {
+            bail!(
+                "{}: manifest does not match the first video \
+                 (different archive or wrong file order)",
+                v.display()
+            );
+        }
+    }
+
+    let mut order: Vec<usize> = (0..mans.len()).collect();
+    order.sort_by_key(|&i| mans[i].part.map(|p| p.index).unwrap_or(0));
+
+    let mut expect = 0u64;
+    for (pos, &i) in order.iter().enumerate() {
+        let p = mans[i].part.unwrap_or(PartSpec {
+            index: 0,
+            payload_offset: 0,
+            payload_len: base.payload.compressed_len,
+        });
+        if p.index as usize != pos {
+            let have: Vec<String> = order
+                .iter()
+                .map(|&j| mans[j].part.map(|q| q.index).unwrap_or(0).to_string())
+                .collect();
+            bail!("part {pos} is missing (have parts {})", have.join(", "));
+        }
+        if p.payload_offset != expect {
+            bail!(
+                "part {} starts at offset {}, expected {}",
+                p.index,
+                p.payload_offset,
+                expect
+            );
+        }
+        expect += p.payload_len;
+    }
+    if expect != base.payload.compressed_len {
+        bail!(
+            "parts cover {expect} payload bytes, archive has {} \
+             (a part file is missing?)",
+            base.payload.compressed_len
+        );
+    }
+    Ok(order)
+}
+
+pub fn run(o: UnpackOpts) -> Result<()> {
+    if o.videos.is_empty() {
+        bail!("no input videos");
+    }
+    if o.manifest.is_some() && o.videos.len() > 1 {
+        bail!("manifest override (-m) works only with a single video");
+    }
+
+    // ---- read all manifests ----
+    let mut mans = Vec::with_capacity(o.videos.len());
+    for v in &o.videos {
+        mans.push(read_manifest(v, o.manifest.as_deref())?);
+    }
+
+    // ---- validate the set ----
+    let order = check_parts(&mans, &o.videos)?;
+    let base = mans[0].clone();
+
+    eprintln!(
+        "archive: {} ({} bytes raw, {} compressed, {} part(s))",
+        base.payload.source_name,
+        base.payload.raw_len,
+        base.payload.compressed_len,
+        order.len()
+    );
+
+    // ---- decode every part in order ----
+    let mut data = Vec::with_capacity(base.payload.compressed_len as usize);
+    for &i in &order {
+        let slice = decode_payload(&o.videos[i], &mans[i])?;
+        if let Some(p) = mans[i].part {
+            if slice.len() as u64 != p.payload_len {
+                bail!(
+                    "{}: decoded {} bytes, manifest says {}",
+                    o.videos[i].display(),
+                    slice.len(),
+                    p.payload_len
+                );
+            }
+        }
+        data.extend_from_slice(&slice);
+    }
+    if data.len() as u64 != base.payload.compressed_len {
+        bail!(
+            "assembled {} payload bytes, expected {}",
+            data.len(),
+            base.payload.compressed_len
+        );
+    }
 
     // ---- decompress ----
     let mut decoder = ruzstd::decoding::StreamingDecoder::new(&data[..])
@@ -236,17 +364,17 @@ pub fn run(o: UnpackOpts) -> Result<()> {
 
     // ---- integrity ----
     let got_sha = sha256_hex(&raw);
-    if got_sha != man.payload.raw_sha256 {
+    if got_sha != base.payload.raw_sha256 {
         bail!(
             "payload checksum mismatch: got {got_sha}, expected {}",
-            man.payload.raw_sha256
+            base.payload.raw_sha256
         );
     }
-    if raw.len() as u64 != man.payload.raw_len {
+    if raw.len() as u64 != base.payload.raw_len {
         bail!(
             "payload length mismatch: got {}, expected {}",
             raw.len(),
-            man.payload.raw_len
+            base.payload.raw_len
         );
     }
     eprintln!("payload verified: {} bytes, sha256 ok", raw.len());
@@ -254,8 +382,8 @@ pub fn run(o: UnpackOpts) -> Result<()> {
     // ---- extract ----
     std::fs::create_dir_all(&o.outdir)
         .with_context(|| format!("cannot create {}", o.outdir.display()))?;
-    let dest = o.outdir.join(&man.payload.source_name);
-    if man.payload.source_is_dir {
+    let dest = o.outdir.join(&base.payload.source_name);
+    if base.payload.source_is_dir {
         let mut ar = tar::Archive::new(&raw[..]);
         ar.unpack(&o.outdir)
             .with_context(|| format!("cannot untar into {}", o.outdir.display()))?;

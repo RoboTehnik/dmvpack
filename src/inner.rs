@@ -163,7 +163,7 @@ fn decode_cw(cw: &mut [u8]) -> Option<()> {
         }
     }
     if l == 0 || l > T {
-        if std::env::var("VIDARC_RS_DEBUG").is_ok() {
+        if std::env::var("DMVPACK_RS_DEBUG").is_ok() {
             eprintln!("BM fail: l={l} lambda={lambda:?} s={s:?}");
         }
         return None;
@@ -183,7 +183,7 @@ fn decode_cw(cw: &mut [u8]) -> Option<()> {
         }
     }
     if positions.len() != l {
-        if std::env::var("VIDARC_RS_DEBUG").is_ok() {
+        if std::env::var("DMVPACK_RS_DEBUG").is_ok() {
             eprintln!("Chien fail: l={l} found={positions:?} lambda={lambda:?}");
         }
         return None;
@@ -204,7 +204,7 @@ fn decode_cw(cw: &mut [u8]) -> Option<()> {
     let errs = match gauss(&a, &rhs) {
         Some(e) => e,
         None => {
-            if std::env::var("VIDARC_RS_DEBUG").is_ok() {
+            if std::env::var("DMVPACK_RS_DEBUG").is_ok() {
                 eprintln!("gauss fail: l={l} positions={positions:?} a={a:?} rhs={rhs:?}");
             }
             return None;
@@ -218,7 +218,7 @@ fn decode_cw(cw: &mut [u8]) -> Option<()> {
     // verify: all syndromes must be zero now
     for j in 0..PARITY {
         if syndrome(cw, j) != 0 {
-            if std::env::var("VIDARC_RS_DEBUG").is_ok() {
+            if std::env::var("DMVPACK_RS_DEBUG").is_ok() {
                 eprintln!(
                     "verify fail at j={j}: positions={positions:?} errs={errs:?} lambda={lambda:?}"
                 );

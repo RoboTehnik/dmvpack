@@ -1,9 +1,9 @@
 [package]
-name = "vidarc"
-version = "1.0.0"
+name = "dmvpack"
+version = "1.1.0"
 edition = "2021"
 authors = ["Vladimir Sirenko <vmsirenko@gmail.com>"]
-description = "Archive files into a black-and-white video (1 bit per cell); manifest in FSK audio track"
+description = "Data Matrix Video Packer: archive files into a black-and-white video (1 bit per cell); manifest in FSK audio track"
 
 [dependencies]
 anyhow = "1"
