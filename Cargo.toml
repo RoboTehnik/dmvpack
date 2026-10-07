@@ -1,0 +1,22 @@
+[package]
+name = "vidarc"
+version = "1.0.0"
+edition = "2021"
+authors = ["Vladimir Sirenko <vmsirenko@gmail.com>"]
+description = "Archive files into a black-and-white video (1 bit per cell); manifest in FSK audio track"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crc32fast = "1"
+hex = "0.4"
+reed-solomon-erasure = "4"
+ruzstd = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+
+[profile.dev]
+opt-level = 1
+debug = 0
