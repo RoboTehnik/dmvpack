@@ -27,39 +27,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Encode a file or directory into .mp4 (manifest embedded in audio)
+    #[command(after_help = "Environment:
+  DMVPACK_PASSWORD  password when -p is given without a value
+  DMVPACK_DEBUG     trace manifest search and alignment
+  DMVPACK_RS_DEBUG  inner Reed-Solomon statistics")]
     Pack {
         /// File or directory to archive
         input: PathBuf,
         /// Output video (default: <input>.mp4)
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Cell size in pixels (>= 4)
-        #[arg(long, default_value_t = 8)]
-        cell: usize,
-        /// Grid columns
-        #[arg(long, default_value_t = 240)]
-        cols: usize,
-        /// Grid rows
-        #[arg(long, default_value_t = 135)]
-        rows: usize,
-        /// Frames per second
-        #[arg(long, default_value_t = 30)]
-        fps: u32,
-        /// x264 quality (lower = better)
-        #[arg(long, default_value_t = 16)]
-        crf: u32,
-        /// Frames per RS codeword group
-        #[arg(long, default_value_t = 4)]
-        group: usize,
-        /// Parity frames per group
-        #[arg(long, default_value_t = 1)]
-        parity: usize,
-        /// x264 preset
-        #[arg(long, default_value_t = "medium".to_string())]
-        preset: String,
-        /// Also write the manifest as JSON to this path (debugging aid)
-        #[arg(long)]
-        dump_manifest: Option<PathBuf>,
         /// Split the output into parts of at most this size (e.g. 500M, 1G)
         #[arg(long)]
         max_part_size: Option<String>,
@@ -67,16 +44,44 @@ enum Cmd {
         /// `-p` without a value reads DMVPACK_PASSWORD
         #[arg(short, long, value_name = "PASSWORD", num_args = 0..=1, default_missing_value = "")]
         password: Option<String>,
+        /// x264 preset (slower = smaller file)
+        #[arg(long, default_value_t = "medium".to_string(), help_heading = "Advanced")]
+        preset: String,
+        /// x264 quality (lower = better quality, bigger file)
+        #[arg(long, default_value_t = 16, help_heading = "Advanced")]
+        crf: u32,
+        /// Frames per second
+        #[arg(long, default_value_t = 30, help_heading = "Advanced")]
+        fps: u32,
+        /// Cell size in pixels (>= 4)
+        #[arg(long, default_value_t = 8, help_heading = "Advanced")]
+        cell: usize,
+        /// Grid columns
+        #[arg(long, default_value_t = 240, help_heading = "Advanced")]
+        cols: usize,
+        /// Grid rows
+        #[arg(long, default_value_t = 135, help_heading = "Advanced")]
+        rows: usize,
+        /// Frames per RS codeword group
+        #[arg(long, default_value_t = 4, help_heading = "Advanced")]
+        group: usize,
+        /// Parity frames per group
+        #[arg(long, default_value_t = 1, help_heading = "Advanced")]
+        parity: usize,
+        /// Also write the manifest as JSON to this path (debugging aid)
+        #[arg(long, help_heading = "Advanced")]
+        dump_manifest: Option<PathBuf>,
     },
     /// Decode .mp4 (manifest read from the audio track) back to the original;
     /// pass every part file if packed with --max-part-size
+    #[command(after_help = "Environment:
+  DMVPACK_PASSWORD  password if -p is not passed (tried automatically)
+  DMVPACK_DEBUG     trace manifest search and alignment
+  DMVPACK_RS_DEBUG  inner Reed-Solomon statistics")]
     Unpack {
         /// Video(s) produced by `pack`
         #[arg(required = true)]
         video: Vec<PathBuf>,
-        /// Read the manifest from this JSON file instead of the audio track
-        #[arg(short, long)]
-        manifest: Option<PathBuf>,
         /// Output directory
         #[arg(short, long, default_value = ".")]
         outdir: PathBuf,
@@ -84,6 +89,9 @@ enum Cmd {
         /// DMVPACK_PASSWORD (which is also tried automatically if not passed)
         #[arg(short, long, value_name = "PASSWORD", num_args = 0..=1, default_missing_value = "")]
         password: Option<String>,
+        /// Read the manifest from this JSON file instead of the audio track
+        #[arg(short, long, help_heading = "Advanced")]
+        manifest: Option<PathBuf>,
     },
 }
 

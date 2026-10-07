@@ -98,7 +98,8 @@ dmvpack pack mydata/ -o mydata.mp4 -p "correct horse battery staple"
 dmvpack unpack mydata.mp4 -o restored/ -p "correct horse battery staple"
 ```
 
-Опции `pack`:
+Опции `pack` (в `--help` разделены на `Options` — простые, и `Advanced` —
+тонкая настройка; там же выводятся переменные окружения):
 
 | Опция | По умолчанию | Назначение |
 |---|---|---|
