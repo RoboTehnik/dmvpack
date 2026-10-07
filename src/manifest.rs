@@ -56,6 +56,23 @@ pub struct PartSpec {
     pub payload_len: u64,
 }
 
+/// Password-encryption parameters (public; the key never leaves derivation).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EncryptionSpec {
+    /// KDF id: 1 = argon2id (v0x13).
+    pub kdf: u8,
+    /// argon2id memory cost in KiB.
+    pub m_cost: u32,
+    /// argon2id passes.
+    pub t_cost: u32,
+    /// argon2id lanes.
+    pub p_cost: u32,
+    ///16-byte random salt.
+    pub salt: Vec<u8>,
+    ///12-byte random nonce for chacha20poly1305.
+    pub nonce: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
     pub version: u32,
@@ -66,6 +83,8 @@ pub struct Manifest {
     pub frame_crc: Vec<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part: Option<PartSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<EncryptionSpec>,
 }
 
 const MAGIC: &[u8; 4] = b"VARC";
@@ -129,6 +148,22 @@ impl Manifest {
             t.extend_from_slice(&0u16.to_le_bytes());
             t.extend_from_slice(&p.payload_offset.to_le_bytes());
             t.extend_from_slice(&p.payload_len.to_le_bytes());
+            let tcrc = crc32fast::hash(&t);
+            b.extend_from_slice(&t);
+            b.extend_from_slice(&tcrc.to_le_bytes());
+        }
+        if let Some(e) = &self.encryption {
+            let mut t = Vec::with_capacity(48);
+            t.extend_from_slice(b"ENC1");
+            t.push(FORMAT_VERSION as u8);
+            t.push(e.kdf);
+            t.extend_from_slice(&0u16.to_le_bytes()); // reserved
+            t.extend_from_slice(&e.m_cost.to_le_bytes());
+            t.extend_from_slice(&e.t_cost.to_le_bytes());
+            t.extend_from_slice(&e.p_cost.to_le_bytes());
+            t.extend_from_slice(&fixed::<16>(&e.salt));
+            t.extend_from_slice(&fixed::<12>(&e.nonce));
+            debug_assert_eq!(t.len(), 48);
             let tcrc = crc32fast::hash(&t);
             b.extend_from_slice(&t);
             b.extend_from_slice(&tcrc.to_le_bytes());
@@ -202,7 +237,8 @@ impl Manifest {
         }
         // optional split-part trailer after the main crc (ignored by old readers)
         let mut part = None;
-        let rest = &data[r.p..];
+        let mut encryption = None;
+        let mut rest = &data[r.p..];
         if rest.len() >= 28 && &rest[..4] == b"VPT1" {
             let tcrc = u32::from_le_bytes(rest[24..28].try_into().unwrap());
             if crc32fast::hash(&rest[..24]) != tcrc {
@@ -213,6 +249,26 @@ impl Manifest {
                 payload_offset: u64::from_le_bytes(rest[8..16].try_into().unwrap()),
                 payload_len: u64::from_le_bytes(rest[16..24].try_into().unwrap()),
             });
+            rest = &rest[28..];
+        }
+        // optional encryption trailer (ignored by old readers)
+        if rest.len() >= 52 && &rest[..4] == b"ENC1" {
+            let tcrc = u32::from_le_bytes(rest[48..52].try_into().unwrap());
+            if crc32fast::hash(&rest[..48]) != tcrc {
+                bail!("manifest encryption trailer crc32 mismatch");
+            }
+            let ver = rest[4];
+            if ver != FORMAT_VERSION as u8 {
+                bail!("unsupported encryption trailer version {ver}");
+            }
+            encryption = Some(EncryptionSpec {
+                kdf: rest[5],
+                m_cost: u32::from_le_bytes(rest[8..12].try_into().unwrap()),
+                t_cost: u32::from_le_bytes(rest[12..16].try_into().unwrap()),
+                p_cost: u32::from_le_bytes(rest[16..20].try_into().unwrap()),
+                salt: rest[20..36].to_vec(),
+                nonce: rest[36..48].to_vec(),
+            });
         }
         Ok(Manifest {
             version: 1,
@@ -222,6 +278,7 @@ impl Manifest {
             payload,
             frame_crc,
             part,
+            encryption,
         })
     }
 }
@@ -230,6 +287,15 @@ fn push_str(b: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     b.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
     b.extend_from_slice(bytes);
+}
+
+/// Copy into a fixed-size array, zero-padding or truncating as needed, so the
+/// binary trailer layout stays fixed-size regardless of (corrupt) input.
+fn fixed<const N: usize>(v: &[u8]) -> [u8; N] {
+    let mut a = [0u8; N];
+    let n = v.len().min(N);
+    a[..n].copy_from_slice(&v[..n]);
+    a
 }
 
 struct Reader<'a> {
@@ -301,6 +367,7 @@ mod tests {
                 .map(|i| (i.wrapping_mul(2654435761) >> 16) as u16)
                 .collect(),
             part: None,
+            encryption: None,
         }
     }
 
@@ -357,5 +424,66 @@ mod tests {
         let n = b.len();
         b[n - 5] ^= 0xff; // inside the trailer body
         assert!(Manifest::from_bytes(&b).is_err());
+    }
+
+    fn enc_spec() -> EncryptionSpec {
+        EncryptionSpec {
+            kdf: 1,
+            m_cost: 19456,
+            t_cost: 2,
+            p_cost: 1,
+            salt: vec![0x5a; 16],
+            nonce: vec![0xa5; 12],
+        }
+    }
+
+    #[test]
+    fn encryption_trailer_roundtrip() {
+        let mut m = sample();
+        m.encryption = Some(enc_spec());
+        let b = m.to_bytes();
+        let back = Manifest::from_bytes(&b).unwrap();
+        assert_eq!(m, back);
+        assert_eq!(back.encryption.unwrap().kdf, 1);
+    }
+
+    #[test]
+    fn encryption_and_part_trailers_together() {
+        let mut m = sample();
+        m.part = Some(PartSpec {
+            index: 2,
+            payload_offset: 555,
+            payload_len: 777,
+        });
+        m.encryption = Some(enc_spec());
+        let b = m.to_bytes();
+        let back = Manifest::from_bytes(&b).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn detects_encryption_trailer_corruption() {
+        let mut m = sample();
+        m.encryption = Some(enc_spec());
+        let mut b = m.to_bytes();
+        let n = b.len();
+        b[n - 9] ^= 0xff; // inside the encryption trailer body
+        assert!(Manifest::from_bytes(&b).is_err());
+    }
+
+    #[test]
+    fn json_roundtrip_with_encryption() {
+        let mut m = sample();
+        m.encryption = Some(enc_spec());
+        let json = serde_json::to_string_pretty(&m).unwrap();
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(m, back);
+        // old dumps without the field still load
+        let mut plain = sample();
+        plain.part = None;
+        let json = serde_json::to_string_pretty(&plain).unwrap();
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(plain, back);
+        assert!(back.encryption.is_none());
     }
 }

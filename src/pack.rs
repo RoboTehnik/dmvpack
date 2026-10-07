@@ -1,8 +1,11 @@
+use crate::crypt::PrivateSpec;
 use crate::ecc;
 use crate::ffmpeg;
 use crate::frame;
 use crate::inner;
-use crate::manifest::{EccSpec, GridSpec, Manifest, PartSpec, PayloadSpec, VideoSpec};
+use crate::manifest::{
+    EccSpec, EncryptionSpec, GridSpec, Manifest, PartSpec, PayloadSpec, VideoSpec,
+};
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -24,6 +27,8 @@ pub struct PackOpts {
     pub dump_manifest: Option<PathBuf>,
     /// e.g. "500M", "1G", plain bytes
     pub max_part_size: Option<String>,
+    /// Encrypt the payload when set (resolved, non-empty).
+    pub password: Option<String>,
 }
 
 /// Parse a size like `500M`, `1G`, `1024K`, `512KB` or plain bytes.
@@ -100,6 +105,7 @@ struct PartCtx<'a> {
     source_name: &'a str,
     source_is_dir: bool,
     compressed_total: u64,
+    encryption: Option<EncryptionSpec>,
 }
 
 /// Render + encode one part; returns the final file size in bytes.
@@ -173,6 +179,7 @@ fn build_part(
         },
         frame_crc,
         part,
+        encryption: ctx.encryption.clone(),
     };
     let blob = manifest.to_bytes();
     // keep at least two full manifest copies in the audio track, even when
@@ -322,6 +329,37 @@ pub fn run(o: PackOpts) -> Result<()> {
         t_start.elapsed().as_secs_f64()
     );
 
+    // 2b. optional password encryption: the sealed stream replaces the plain
+    // one before any ECC/frames; sensitive manifest fields move inside it
+    let mut stream = compressed;
+    let mut encryption = None;
+    let mut pub_raw_len = raw_len;
+    let mut pub_raw_sha = raw_sha256.clone();
+    let mut pub_name = source_name.clone();
+    let mut pub_is_dir = is_dir;
+    if let Some(pw) = &o.password {
+        let private = PrivateSpec {
+            raw_len,
+            raw_sha256: raw_sha256.clone(),
+            compressed_len: stream.len() as u64,
+            source_name: source_name.clone(),
+            source_is_dir: is_dir,
+        };
+        let pj = serde_json::to_vec(&private)?;
+        let (ct, spec) = crate::crypt::encrypt(&crate::crypt::wrap(&stream, &pj), pw)?;
+        eprintln!(
+            "encrypted: {} -> {} bytes (argon2id + chacha20-poly1305)",
+            stream.len(),
+            ct.len()
+        );
+        stream = ct;
+        encryption = Some(spec);
+        pub_raw_len = 0;
+        pub_raw_sha = String::new();
+        pub_name = String::new();
+        pub_is_dir = false;
+    }
+
     // 3. layout
     let ecc = EccSpec {
         group_frames: o.group,
@@ -329,15 +367,20 @@ pub fn run(o: PackOpts) -> Result<()> {
         shard_bytes,
     };
     let dpg = ecc.data_per_group();
-    let total_groups = compressed.len().div_ceil(dpg).max(1);
+    let total_groups = stream.len().div_ceil(dpg).max(1);
     let total_frames = total_groups * o.group;
     let duration = total_frames as f64 / o.fps as f64;
     eprintln!(
         "plan: {total_frames} frames total ({nw}x{nh}, {shard_bytes} B/frame, \
-         {total_groups} groups, ~{duration:.1}s{})",
+         {total_groups} groups, ~{duration:.1}s{}{})",
         match limit {
             Some(l) => format!(", split at {l} bytes per part"),
             None => String::new(),
+        },
+        if encryption.is_some() {
+            ", encrypted"
+        } else {
+            ""
         }
     );
 
@@ -359,11 +402,12 @@ pub fn run(o: PackOpts) -> Result<()> {
         preset: &o.preset,
         group: o.group,
         ecc,
-        raw_len,
-        raw_sha256: &raw_sha256,
-        source_name: &source_name,
-        source_is_dir: is_dir,
-        compressed_total: compressed.len() as u64,
+        raw_len: pub_raw_len,
+        raw_sha256: &pub_raw_sha,
+        source_name: &pub_name,
+        source_is_dir: pub_is_dir,
+        compressed_total: stream.len() as u64,
+        encryption,
     };
 
     // 4. encode part(s); the first cut uses a conservative size estimate and
@@ -375,7 +419,7 @@ pub fn run(o: PackOpts) -> Result<()> {
     let mut sizes: Vec<u64> = Vec::new();
 
     loop {
-        let remaining = compressed.len() - offset;
+        let remaining = stream.len() - offset;
         if remaining == 0 {
             break;
         }
@@ -405,7 +449,7 @@ pub fn run(o: PackOpts) -> Result<()> {
             let s = build_part(
                 &ctx,
                 &path,
-                &compressed[offset..offset + pl],
+                &stream[offset..offset + pl],
                 part,
                 dump,
                 t_start,

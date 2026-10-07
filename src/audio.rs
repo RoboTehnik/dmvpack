@@ -530,6 +530,7 @@ mod tests {
                 .map(|i| (i.wrapping_mul(2654435761) >> 16) as u16)
                 .collect(),
             part: None,
+            encryption: None,
         }
     }
 

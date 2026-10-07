@@ -72,6 +72,8 @@ pub struct UnpackOpts {
     pub videos: Vec<PathBuf>,
     pub manifest: Option<PathBuf>,
     pub outdir: PathBuf,
+    /// Password for encrypted archives (resolved, may come from the env).
+    pub password: Option<String>,
 }
 
 /// Recover the manifest of one video: from JSON (override) or its audio track.
@@ -258,6 +260,7 @@ fn check_parts(mans: &[Manifest], videos: &[PathBuf]) -> Result<Vec<usize>> {
             || m.payload.source_is_dir != base.payload.source_is_dir
             || m.grid != base.grid
             || m.ecc != base.ecc
+            || m.encryption != base.encryption
         {
             bail!(
                 "{}: manifest does not match the first video \
@@ -305,6 +308,7 @@ fn check_parts(mans: &[Manifest], videos: &[PathBuf]) -> Result<Vec<usize>> {
 }
 
 pub fn run(o: UnpackOpts) -> Result<()> {
+    let t_all = std::time::Instant::now();
     if o.videos.is_empty() {
         bail!("no input videos");
     }
@@ -320,18 +324,11 @@ pub fn run(o: UnpackOpts) -> Result<()> {
 
     // ---- validate the set ----
     let order = check_parts(&mans, &o.videos)?;
-    let base = mans[0].clone();
-
-    eprintln!(
-        "archive: {} ({} bytes raw, {} compressed, {} part(s))",
-        base.payload.source_name,
-        base.payload.raw_len,
-        base.payload.compressed_len,
-        order.len()
-    );
+    let mut base = mans[0].clone();
+    let stream_len = base.payload.compressed_len;
 
     // ---- decode every part in order ----
-    let mut data = Vec::with_capacity(base.payload.compressed_len as usize);
+    let mut data = Vec::with_capacity(stream_len as usize);
     for &i in &order {
         let slice = decode_payload(&o.videos[i], &mans[i])?;
         if let Some(p) = mans[i].part {
@@ -346,13 +343,44 @@ pub fn run(o: UnpackOpts) -> Result<()> {
         }
         data.extend_from_slice(&slice);
     }
-    if data.len() as u64 != base.payload.compressed_len {
+    if data.len() as u64 != stream_len {
         bail!(
             "assembled {} payload bytes, expected {}",
             data.len(),
-            base.payload.compressed_len
+            stream_len
         );
     }
+
+    // ---- decrypt (password-protected archives) ----
+    if let Some(spec) = base.encryption.clone() {
+        let pw = match o.password.as_deref() {
+            Some(p) => p,
+            None => bail!("archive is encrypted: pass --password or set DMVPACK_PASSWORD"),
+        };
+        let sealed = crate::crypt::decrypt(&data, &spec, pw)?;
+        let (zs, pj) = crate::crypt::unwrap_sealed(&sealed)?;
+        let priv_spec: crate::crypt::PrivateSpec =
+            serde_json::from_slice(pj).context("corrupt private manifest")?;
+        data = zs.to_vec();
+        base.payload.raw_len = priv_spec.raw_len;
+        base.payload.raw_sha256 = priv_spec.raw_sha256;
+        base.payload.compressed_len = priv_spec.compressed_len;
+        base.payload.source_name = priv_spec.source_name;
+        base.payload.source_is_dir = priv_spec.source_is_dir;
+        eprintln!(
+            "decrypted: {} payload bytes (argon2id + chacha20-poly1305) [{:.1}s]",
+            data.len(),
+            t_all.elapsed().as_secs_f64()
+        );
+    }
+
+    eprintln!(
+        "archive: {} ({} bytes raw, {} compressed, {} part(s))",
+        base.payload.source_name,
+        base.payload.raw_len,
+        base.payload.compressed_len,
+        order.len()
+    );
 
     // ---- decompress ----
     let mut decoder = ruzstd::decoding::StreamingDecoder::new(&data[..])

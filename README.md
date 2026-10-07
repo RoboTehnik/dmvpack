@@ -2,7 +2,7 @@
 
 **Data Matrix Video Packer** — архиватор в чёрно-белое видео.
 
-**Версия 1.1.0** · Copyright 2026 Vladimir Sirenko \<vmsirenko@gmail.com\>
+**Версия 1.2.0** · Copyright 2026 Vladimir Sirenko \<vmsirenko@gmail.com\>
 
 Архиватор, который упаковывает файлы и каталоги в чёрно-белое видео (ровно **1 бит на ячейку**) и
 обратно извлекает их. В основе формата кадра — технология штрихкода **Data Matrix**. Записанный
@@ -92,6 +92,10 @@ dmvpack unpack mydata.mp4 -o restored/
 dmvpack pack mydata/ -o mydata.mp4 --max-part-size 500M
 # → mydata.part1.mp4, mydata.part2.mp4, ...
 dmvpack unpack mydata.part1.mp4 mydata.part2.mp4 mydata.part3.mp4 -o restored/
+
+# запаковать с паролем (шифрование архива)
+dmvpack pack mydata/ -o mydata.mp4 -p "correct horse battery staple"
+dmvpack unpack mydata.mp4 -o restored/ -p "correct horse battery staple"
 ```
 
 Опции `pack`:
@@ -106,11 +110,13 @@ dmvpack unpack mydata.part1.mp4 mydata.part2.mp4 mydata.part3.mp4 -o restored/
 | `--preset` | medium | пресет x264 |
 | `--group`, `--parity` | 4, 1 | кадров в RS-группе / кадров паритета |
 | `--max-part-size` | — | разбить выход на части не больше этого размера (`500M`, `1G`, байты) |
+| `-p, --password` | — | зашифровать архив (см. «Пароль»); `-p` без значения читает `DMVPACK_PASSWORD` |
 | `--dump-manifest` | — | выгрузить манифест в JSON (отладка) |
 
 `unpack`: принимает **один или несколько** mp4 (все части архива), `-o/--outdir`
 (по умолчанию `.`), `-m/--manifest` — читать манифест из JSON вместо звуковой
-дорожки (только для одного файла).
+дорожки (только для одного файла), `-p/--password` — пароль зашифрованного
+архива (если не передан, пробуется переменная окружения `DMVPACK_PASSWORD`).
 
 ## Разбиение на части
 
@@ -131,11 +137,44 @@ dmvpack unpack mydata.part1.mp4 mydata.part2.mp4 mydata.part3.mp4 -o restored/
 
 Требуется `ffmpeg` и `ffprobe` в PATH (в Windows — `ffmpeg.exe`, `ffprobe.exe`).
 
+## Пароль (шифрование)
+
+`-p/--password` шифрует архив целиком:
+
+- **KDF**: Argon2id (v0x13,19 MiB,2 прохода,1 поток) — подбор пароля дорог;
+- **шифр**: ChaCha20-Poly1305 (AEAD) — конфиденциальность + аутентификация,
+  случайный16-байтовый соль и12-байтовый nonce на каждый архив;
+- шифруется сжатый поток **до** ECC и кадров: содержимое файлов, tar-пути,
+  а также чувствительные поля манифеста (имя исходника, размеры, sha256) —
+  они переезжают внутрь шифротекста, в открытом манифесте остаются нули;
+- параметры KDF/соль/nonce лежат в манифесте (трейлер `ENC1`, формат
+  обратно-совместим: старые версии манифест без `ENC1` читают, но сам
+  архив без пароля не расшифруют);
+
+Когда пароль не передан, архив создаётся как раньше — без изменений формата.
+
+Ввод пароля: `-p VALUE` или `-p` без значения / без флага + переменная
+окружения `DMVPACK_PASSWORD`. Пароль в аргументе командной строки виден в
+`ps` и истории shell — для публичных машин предпочитайте окружение:
+
+```bash
+dmvpack pack mydata/ -o mydata.mp4 -p            # читает DMVPACK_PASSWORD
+DMVPACK_PASSWORD=... dmvpack unpack mydata.mp4 -o restored/
+```
+
+Ошибки однозначны: без пароля — `archive is encrypted: pass --password or set
+DMVPACK_PASSWORD`; неверный пароль — `wrong password or corrupted data`
+(AEAD-тег не сойдётся).
+
+Что **не** скрыто: сам факт наличия архива, его длительность/размер (длина
+видео и число кадров видны любому), параметры сетки и ECC — они нужны для
+чтения кадров.
+
 ## Сборка
 
 ```bash
 cargo build --release            # Linux
-cargo test --release             #14 тестов (+1 ignored — ручной диаг)
+cargo test --release             #23 теста (+1 ignored — ручной диаг)
 cargo clippy --all-targets && cargo fmt --check
 ```
 
@@ -161,6 +200,7 @@ cargo build --release --target x86_64-pc-windows-gnu
 | `src/inner.rs` | внутренний RS(255,239): encode/decode над GF(256) |
 | `src/audio.rs` | FSK-модуляция/демодуляция манифеста, комбинирование копий |
 | `src/manifest.rs` | бинарный формат манифеста (crc32 контента) |
+| `src/crypt.rs` | шифрование паролем: argon2id + chacha20-poly1305 |
 | `src/pack.rs`, `src/unpack.rs` | двухпроходный пакер / распаковка |
 | `src/ffmpeg.rs` | порождение процессов ffmpeg/ffprobe |
 | `examples/ber.rs`, `examples/diag.rs` | расчёт BER, диагностика повреждений |
@@ -169,6 +209,7 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 - `DMVPACK_DEBUG` — ход поиска манифеста и выравнивания;
 - `DMVPACK_RS_DEBUG` — статистика внутреннего RS;
+- `DMVPACK_PASSWORD` — пароль для `-p` без значения (pack/unpack);
 - `DMVPACK_DIAG_PCM`, `DMVPACK_DIAG_REF` — сброс PCM/эталона для ручного теста `audio_damage`.
 
 ## Ограничения

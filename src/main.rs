@@ -1,4 +1,5 @@
 mod audio;
+mod crypt;
 mod ecc;
 mod ffmpeg;
 mod frame;
@@ -62,6 +63,10 @@ enum Cmd {
         /// Split the output into parts of at most this size (e.g. 500M, 1G)
         #[arg(long)]
         max_part_size: Option<String>,
+        /// Encrypt the archive (argon2id + chacha20-poly1305).
+        /// `-p` without a value reads DMVPACK_PASSWORD
+        #[arg(short, long, value_name = "PASSWORD", num_args = 0..=1, default_missing_value = "")]
+        password: Option<String>,
     },
     /// Decode .mp4 (manifest read from the audio track) back to the original;
     /// pass every part file if packed with --max-part-size
@@ -75,7 +80,34 @@ enum Cmd {
         /// Output directory
         #[arg(short, long, default_value = ".")]
         outdir: PathBuf,
+        /// Password for encrypted archives; `-p` without a value reads
+        /// DMVPACK_PASSWORD (which is also tried automatically if not passed)
+        #[arg(short, long, value_name = "PASSWORD", num_args = 0..=1, default_missing_value = "")]
+        password: Option<String>,
     },
+}
+
+/// Resolve the pack password: absent = no encryption, empty = from env.
+fn pack_password(flag: Option<String>) -> Result<Option<String>> {
+    let p = match flag {
+        None => return Ok(None),
+        Some(p) if !p.is_empty() => p,
+        Some(_) => std::env::var("DMVPACK_PASSWORD").unwrap_or_default(),
+    };
+    if p.is_empty() {
+        anyhow::bail!("empty password: pass --password VALUE or set DMVPACK_PASSWORD");
+    }
+    Ok(Some(p))
+}
+
+/// Resolve the unpack password: flag first, then the env.
+fn unpack_password(flag: Option<String>) -> Option<String> {
+    match flag {
+        Some(p) if !p.is_empty() => Some(p),
+        _ => std::env::var("DMVPACK_PASSWORD")
+            .ok()
+            .filter(|p| !p.is_empty()),
+    }
 }
 
 fn main() -> Result<()> {
@@ -94,6 +126,7 @@ fn main() -> Result<()> {
             preset,
             dump_manifest,
             max_part_size,
+            password,
         } => pack::run(pack::PackOpts {
             input,
             output,
@@ -107,15 +140,18 @@ fn main() -> Result<()> {
             preset,
             dump_manifest,
             max_part_size,
+            password: pack_password(password)?,
         }),
         Cmd::Unpack {
             video,
             manifest,
             outdir,
+            password,
         } => unpack::run(unpack::UnpackOpts {
             videos: video,
             manifest,
             outdir,
+            password: unpack_password(password),
         }),
     }
 }

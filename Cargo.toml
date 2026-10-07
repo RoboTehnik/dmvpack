@@ -1,14 +1,17 @@
 [package]
 name = "dmvpack"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 authors = ["Vladimir Sirenko <vmsirenko@gmail.com>"]
 description = "Data Matrix Video Packer: archive files into a black-and-white video (1 bit per cell); manifest in FSK audio track"
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.6.0"
+chacha20poly1305 = "0.11.0"
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1"
+getrandom = "0.4.3"
 hex = "0.4"
 reed-solomon-erasure = "4"
 ruzstd = "0.9"
