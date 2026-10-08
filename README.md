@@ -12,9 +12,9 @@ track, and the frames are protected by two levels of error correction.
 
 Pure Rust (no native dependencies) + external `ffmpeg`/`ffprobe` in PATH.
 
-A frame of `foxe.exe` packed into a video (snapshot, 1920×1080):
+An example of a packed file frame (snapshot, 1920×1080):
 
-![foxe.exe packed into a black-and-white Data Matrix video frame](docs/foxe-packed-snapshot.jpg)
+![Example of a packed file frame — black-and-white Data Matrix video](docs/example-packed-frame.jpg)
 
 ## Based on Data Matrix
 
