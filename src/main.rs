@@ -9,7 +9,7 @@ mod pack;
 mod unpack;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -118,8 +118,27 @@ fn unpack_password(flag: Option<String>) -> Option<String> {
     }
 }
 
+fn root_long_help(cmd: &mut clap::Command) -> String {
+    let mut out = String::new();
+    for name in ["pack", "unpack"] {
+        if let Some(sub) = cmd.find_subcommand(name) {
+            let mut sub = sub.clone();
+            sub = sub.bin_name(format!("dmvpack {name}"));
+            out.push_str(&format!("=== dmvpack {name} (all parameters) ===\n"));
+            out.push_str(sub.render_long_help().to_string().trim_end());
+            out.push_str("\n\n");
+        }
+    }
+    out.push_str("Copyright 2026 Vladimir Sirenko <vmsirenko@gmail.com>");
+    out
+}
+
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cmd = Cli::command();
+    let long = root_long_help(&mut cmd);
+    cmd = cmd.after_long_help(long);
+    let matches = cmd.get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     match cli.cmd {
         Cmd::Pack {
             input,

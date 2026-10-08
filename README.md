@@ -1,225 +1,230 @@
 # dmvpack
 
-**Data Matrix Video Packer** — архиватор в чёрно-белое видео.
+**Data Matrix Video Packer** — an archiver that packs files into black-and-white video.
 
-**Версия 1.2.0** · Copyright 2026 Vladimir Sirenko \<vmsirenko@gmail.com\>
+**Version 1.2.0** · Copyright 2026 Vladimir Sirenko \<vmsirenko@gmail.com\>
 
-Архиватор, который упаковывает файлы и каталоги в чёрно-белое видео (ровно **1 бит на ячейку**) и
-обратно извлекает их. В основе формата кадра — технология штрихкода **Data Matrix**. Записанный
-mp4 можно заливать на видеохостинг: при повторном кодировании
-(пережатие x264, уменьшение разрешения, пересчёт аудио) данные восстанавливаются —
-манифест лежит в звуковой дорожке, кадры защищены двумя уровнями коррекции ошибок.
+An archiver that packs files and directories into black-and-white video (exactly **1 bit per
+cell**) and extracts them back. The frame format is based on **Data Matrix** barcode technology.
+The recorded mp4 can be uploaded to a video hosting: after re-encoding (x264 transcode,
+resolution change, audio recompression) the data is recovered — the manifest lives in the audio
+track, and the frames are protected by two levels of error correction.
 
-Только Rust (без нативных зависимостей) + внешний `ffmpeg`/`ffprobe` в PATH.
+Pure Rust (no native dependencies) + external `ffmpeg`/`ffprobe` in PATH.
 
-## Основа — Data Matrix
+## Based on Data Matrix
 
-Каждый кадр — по сути один символ **Data Matrix**, адаптированный под видео:
+Each frame is essentially one **Data Matrix** symbol, adapted for video:
 
-- сетка Ч/Б модулей (**1 бит/ячейка**) и **поле по периметру** — как L-рамка и «часовая»
-  рамка Data Matrix: читатель находит сетку даже после масштабирования и смещений;
-- **внутренний RS(255,239) по GF(256)** — та же алгебра Reed–Solomon,
-  что в стандарте Data Matrix **ECC200** (избыточность ±8 % на кадр);
-- последовательность кадров и разбиение на части повторяют идею
-  **Structured Append** Data Matrix — нумерованные символы одного сообщения.
+- a black-and-white module grid (**1 bit/cell**) with a **perimeter border** — like the
+  L-shaped finder pattern and "clock track" of Data Matrix: a reader locates the grid even
+  after scaling and offsets;
+- **inner RS(255,239) over GF(256)** — the same Reed–Solomon algebra as in the Data Matrix
+  **ECC200** standard (~8 % redundancy per frame);
+- the frame sequence and splitting into parts follow the **Structured Append** idea of Data
+  Matrix — numbered symbols of a single message.
 
-Отличия от «чистой» Data Matrix вызваны каналом:
+Differences from "pure" Data Matrix are dictated by the channel:
 
-- поток сжимается (`tar` + `zstd`) до кодирования — в Data Matrix сжатия нет;
-- между кадрами добавлен **внешний уровень RS** (4+1) — восстанавливаются целые
-  потерянные или искажённые «символы»;
-- манифест передаётся **FSK-аудио** отдельной дорожкой;
-- система рассчитана на выживание после **lossy-пережатия видео** (x264, понижение
-  разрешения, пересчёт AAC) — канала, которого у Data Matrix не существует;
-- нет маскировки и змеевидного порядка записи: данные идут растрово, выравнивание
-  даёт поле кадра, а не маска модулей.
+- the stream is compressed (`tar` + `zstd`) before encoding — Data Matrix has no compression;
+- an **outer RS level** (4+1) is added between frames — whole lost or corrupted "symbols"
+  are recovered;
+- the manifest is transmitted as **FSK audio** on a separate track;
+- the system is built to survive **lossy video re-encoding** (x264, resolution downscale,
+  AAC recompression) — a channel that Data Matrix does not have;
+- no masking and no serpentine placement: data goes row by row, alignment comes from the
+  frame border, not from module masking.
 
-## Как это работает
+## How it works
 
-**1. Сжатие.** Каталог/файл → `tar` + `zstd` → непрерывный поток байтов.
+**1. Compression.** Directory/file → `tar` + `zstd` → a continuous byte stream.
 
-**2. Видео (уровень данных).** Поток режется на полезные нагрузки и рисуется кадрами:
+**2. Video (data layer).** The stream is cut into payloads and drawn as frames:
 
-- сетка по умолчанию **240×135 ячеек**, размер ячейки 8 px, поле 2 px → разрешение 1920×1080;
-- в каждой ячейке строго чёрный или белый (1 бит); по умолчанию это **3864 байта на кадр**;
-- читающий декодер по полю и смещениям сетки находит начало кадра даже после масштабирования.
+- default grid **240×135 cells**, cell size 8 px, border 2 px → 1920×1080 resolution;
+- every cell is strictly black or white (1 bit); by default that is **3864 bytes per frame**;
+- the reading decoder locates the start of a frame from the border and grid offsets even
+  after scaling.
 
-**3. Внешний ECC (между кадрами).** Кадры группируются (по умолчанию **4+1**: 4 кадра данных
-+ 1 кадр паритета Reed–Solomon) — полностью потерянные или искажённые кадры восстанавливаются.
+**3. Outer ECC (between frames).** Frames are grouped (default **4+1**:4 data frames
++1 Reed–Solomon parity frame) — fully lost or corrupted frames are recovered.
 
-**4. Внутренний ECC (внутри кадра).** Каждый кадр перед записью проходит **RS(255,239)**
-по GF(256) (синдром → Берлекемп–Масси → Чин → интерполяция, с верификацией результата).
-Полезная нагрузка кадра дополняется нулями до `239×n`, избыточность ±8 % вычищает
-«шумные» ячейки после пережатия.
+**4. Inner ECC (inside a frame).** Before writing, each frame goes through **RS(255,239)**
+over GF(256) (syndromes → Berlekamp–Massey → Chien → interpolation, with result verification).
+The frame payload is zero-padded to `239×n`; the ~8 % redundancy cleans up "noisy" cells
+after re-encoding.
 
-**5. Аудио (манифест).** Имена, размеры, sha256 и crc32 файлов, параметры видео — модулируются
-**FSK: 1200 бод**, тоны 1200/2400 Гц, моно 48 kHz, амплитуда 0.65, 50 мс пауза между копиями,
-преамбула из 256 бит `sha256("vidarc-preamble-v1")` (историческая константа формата).
-Копий манифеста **до 16, минимум 2**
-гарантируются даже для крошечного архива (длительность аудио не короче видео). Демодулятор
-сначала жёстко ищет все прохождения преамбулы, затем мягко комбинирует копии бит в бит
-(по сумме энергий), поэтому пережатое аудио вплоть до AAC ~48 kbps читается без потерь.
+**5. Audio (manifest).** File names, sizes, sha256 and crc32 checksums, video parameters —
+modulated with **FSK:1200 baud**, tones1200/2400 Hz, mono48 kHz, amplitude0.65,
+50 ms pause between copies, a256-bit preamble `sha256("vidarc-preamble-v1")` (a historical
+format constant). Manifest copies are **up to16, at least2** — guaranteed even for a
+tiny archive (audio is never shorter than video). The demodulator first hard-finds all
+preamble occurrences, then softly combines copies bit by bit (by energy sum), so
+re-encoded audio down to AAC ~48 kbps is read losslessly.
 
-**6. Сборка mp4.** `ffmpeg`: видеопоток — `libx264` (по умолчанию `--crf 16 --preset medium`),
-звук — `aac --b:a 96k`. Длительность аудио намеренно больше видео — дорожка не обрезается.
+**6. mp4 assembly.** `ffmpeg`: video stream — `libx264` (default `--crf16 --preset medium`),
+audio — `aac --b:a 96k`. The audio is intentionally longer than the video — the track is
+not trimmed.
 
-## Устойчивость (проверено)
+## Robustness (tested)
 
-Один и тот же архив (448 кадров ≈ 15 с) прогонялся через пережатие и извлекался обратно —
-`cmp` подтверждает **побайтовую идентичность**:
+The same archive (448 frames ≈15 s) was pushed through re-encoding and extracted back —
+`cmp` confirms **byte-identical** output:
 
-| Пережатие | Результат |
+| Re-encoding | Result |
 |---|---|
-| 1080p crf16, aac 96k | 448/448 кадров, идентично |
-| 720p crf26 / 480p crf26, aac 64k | идентично (деградацию кадров добивает внешний RS) |
-| 480p crf32, aac 48k | идентично (манифест — через комбинирование копий) |
-| 360p crf30, aac 48k | идентично |
-| **VK Video (реальный хостинг)**: 1080p→720p, mono AAC 97k→stereo AAC 261k | идентично, sha256 совпал |
-| 480p crf36, **aac 32k** | не выходит — предел схемы (коррелированные ошибки в обеих копиях) |
+| 1080p crf16, aac96k |448/448 frames, identical |
+| 720p crf26 /480p crf26, aac64k | identical (outer RS absorbs frame degradation) |
+| 480p crf32, aac48k | identical (manifest recovered by combining copies) |
+| 360p crf30, aac48k | identical |
+| **VK Video (real hosting)**:1080p→720p, mono AAC97k→stereo AAC261k | identical, sha256 matched |
+| 480p crf36, **aac32k** | fails — the scheme's limit (correlated errors in both copies) |
 
-Практический порог: **видео держит очень сильное пережатие** (360p/crf30), **аудио — ≥ 48 kbps**.
+Practical threshold: **video survives very heavy re-encoding** (360p/crf30),
+**audio needs ≥48 kbps**.
 
-## Использование
+## Usage
 
 ```bash
-# запаковать каталог (или файл) в видео
+# pack a directory (or file) into a video
 dmvpack pack mydata/ -o mydata.mp4
 
-# распаковать обратно
+# unpack it back
 dmvpack unpack mydata.mp4 -o restored/
 
-# разбить на части по500 МБ (каждая часть — самостоятельное видео)
+# split into500 MB parts (each part is a standalone video)
 dmvpack pack mydata/ -o mydata.mp4 --max-part-size 500M
 # → mydata.part1.mp4, mydata.part2.mp4, ...
 dmvpack unpack mydata.part1.mp4 mydata.part2.mp4 mydata.part3.mp4 -o restored/
 
-# запаковать с паролем (шифрование архива)
+# pack with a password (archive encryption)
 dmvpack pack mydata/ -o mydata.mp4 -p "correct horse battery staple"
 dmvpack unpack mydata.mp4 -o restored/ -p "correct horse battery staple"
 ```
 
-Опции `pack` (в `--help` разделены на `Options` — простые, и `Advanced` —
-тонкая настройка; там же выводятся переменные окружения):
+`pack` options (grouped in `--help` into `Options` — simple, and `Advanced` —
+fine tuning; environment variables are listed there as well):
 
-| Опция | По умолчанию | Назначение |
+| Option | Default | Purpose |
 |---|---|---|
-| `-o, --output` | `<input>.mp4` | выходной файл |
-| `--cell` | 8 | размер ячейки в пикселях (≥ 4) |
-| `--cols`, `--rows` | 240, 135 | сетка (240×135 = 1080p при cell 8) |
-| `--fps` | 30 | частота кадров |
-| `--crf` | 16 | качество x264 (ниже = лучше) |
-| `--preset` | medium | пресет x264 |
-| `--group`, `--parity` | 4, 1 | кадров в RS-группе / кадров паритета |
-| `--max-part-size` | — | разбить выход на части не больше этого размера (`500M`, `1G`, байты) |
-| `-p, --password` | — | зашифровать архив (см. «Пароль»); `-p` без значения читает `DMVPACK_PASSWORD` |
-| `--dump-manifest` | — | выгрузить манифест в JSON (отладка) |
+| `-o, --output` | `<input>.mp4` | output file |
+| `--cell` |8 | cell size in pixels (≥4) |
+| `--cols`, `--rows` | 240, 135 | grid (240×135 =1080p at cell8) |
+| `--fps` | 30 | frames per second |
+| `--crf` | 16 | x264 quality (lower = better) |
+| `--preset` | medium | x264 preset |
+| `--group`, `--parity` |4,1 | frames per RS group / parity frames |
+| `--max-part-size` | — | split the output into parts no larger than this (`500M`, `1G`, bytes) |
+| `-p, --password` | — | encrypt the archive (see "Password"); `-p` without a value reads `DMVPACK_PASSWORD` |
+| `--dump-manifest` | — | also write the manifest as JSON (debugging aid) |
 
-`unpack`: принимает **один или несколько** mp4 (все части архива), `-o/--outdir`
-(по умолчанию `.`), `-m/--manifest` — читать манифест из JSON вместо звуковой
-дорожки (только для одного файла), `-p/--password` — пароль зашифрованного
-архива (если не передан, пробуется переменная окружения `DMVPACK_PASSWORD`).
+`unpack`: accepts **one or several** mp4 files (all parts of the archive), `-o/--outdir`
+(default `.`), `-m/--manifest` — read the manifest from JSON instead of the audio track
+(single file only), `-p/--password` — password of an encrypted archive (if not passed,
+the `DMVPACK_PASSWORD` environment variable is tried).
 
-## Разбиение на части
+## Splitting into parts
 
-Видеоархив получается в ~2.5–7 раз больше исходника (запакованные данные
-несжимаемы x264). `--max-part-size` режет полезную нагрузку на части, каждая из
-которых — **независимое видео со своим манифестом в аудио**:
+A video archive comes out ~2.5–7× larger than the original (packed data is
+incompressible for x264). `--max-part-size` cuts the payload into parts, each of which
+is **a standalone video with its own manifest in the audio**:
 
-- имена: `<output>.part1.mp4`, `.part2.mp4`, …; если всё влезло в одну часть —
-  файл называется просто `<output>.mp4`;
-- лимит жёсткий: часть, не влезшая в лимит, пересобирается с меньшей
-  нагрузкой (фактическое соотношение размеров зависит от `--crf` и содержимого);
-- порядок и полнота частей проверяются по манифестам, **имена файлов не
-  важны** — хостинги переименовывают скачанные файлы (VK Video выдаёт
+- names: `<output>.part1.mp4`, `.part2.mp4`, …; if everything fits into one part —
+  the file is simply called `<output>.mp4`;
+- the limit is hard: a part that does not fit is rebuilt with a smaller payload
+  (the actual size ratio depends on `--crf` and on the content);
+- part order and completeness are verified from the manifests, **file names do not
+  matter** — hostings rename downloaded files (VK Video hands out
   `18466093402805.mp4`);
-- пропуск части диагностируется явно: `part 2 is missing (have parts 0, 1, 3)`;
-- каждую часть можно заливать на видеохостинг отдельно; скачав все,
-  передайте их в `unpack` в любом порядке.
+- a missing part is diagnosed explicitly: `part2 is missing (have parts0,1,3)`;
+- each part can be uploaded to a video hosting separately; once all are downloaded,
+  pass them to `unpack` in any order.
 
-Требуется `ffmpeg` и `ffprobe` в PATH (в Windows — `ffmpeg.exe`, `ffprobe.exe`).
+`ffmpeg` and `ffprobe` are required in PATH (on Windows — `ffmpeg.exe`, `ffprobe.exe`).
 
-## Пароль (шифрование)
+## Password (encryption)
 
-`-p/--password` шифрует архив целиком:
+`-p/--password` encrypts the whole archive:
 
-- **KDF**: Argon2id (v0x13,19 MiB,2 прохода,1 поток) — подбор пароля дорог;
-- **шифр**: ChaCha20-Poly1305 (AEAD) — конфиденциальность + аутентификация,
-  случайный16-байтовый соль и12-байтовый nonce на каждый архив;
-- шифруется сжатый поток **до** ECC и кадров: содержимое файлов, tar-пути,
-  а также чувствительные поля манифеста (имя исходника, размеры, sha256) —
-  они переезжают внутрь шифротекста, в открытом манифесте остаются нули;
-- параметры KDF/соль/nonce лежат в манифесте (трейлер `ENC1`, формат
-  обратно-совместим: старые версии манифест без `ENC1` читают, но сам
-  архив без пароля не расшифруют);
+- **KDF**: Argon2id (v0x13,19 MiB,2 passes,1 thread) — password cracking is expensive;
+- **cipher**: ChaCha20-Poly1305 (AEAD) — confidentiality + authentication, a random
+  16-byte salt and a12-byte nonce per archive;
+- the compressed stream is encrypted **before** ECC and frames: file contents, tar paths,
+  as well as sensitive manifest fields (source name, sizes, sha256) — they move inside
+  the ciphertext, the open manifest keeps zeros;
+- KDF parameters/salt/nonce live in the manifest (`ENC1` trailer; the format is
+  backward-compatible: older versions read the manifest without `ENC1`, they just
+  cannot decrypt the archive without the password).
 
-Когда пароль не передан, архив создаётся как раньше — без изменений формата.
+When no password is passed, the archive is created as before — no format changes.
 
-Ввод пароля: `-p VALUE` или `-p` без значения / без флага + переменная
-окружения `DMVPACK_PASSWORD`. Пароль в аргументе командной строки виден в
-`ps` и истории shell — для публичных машин предпочитайте окружение:
+Password input: `-p VALUE`, or `-p` without a value / without the flag plus the
+`DMVPACK_PASSWORD` environment variable. A password on the command line is visible
+in `ps` and shell history — on shared machines prefer the environment:
 
 ```bash
-dmvpack pack mydata/ -o mydata.mp4 -p            # читает DMVPACK_PASSWORD
+dmvpack pack mydata/ -o mydata.mp4 -p     # reads DMVPACK_PASSWORD
 DMVPACK_PASSWORD=... dmvpack unpack mydata.mp4 -o restored/
 ```
 
-Ошибки однозначны: без пароля — `archive is encrypted: pass --password or set
-DMVPACK_PASSWORD`; неверный пароль — `wrong password or corrupted data`
-(AEAD-тег не сойдётся).
+Errors are unambiguous: no password — `archive is encrypted: pass --password or set
+DMVPACK_PASSWORD`; wrong password — `wrong password or corrupted data`
+(the AEAD tag will not match).
 
-Что **не** скрыто: сам факт наличия архива, его длительность/размер (длина
-видео и число кадров видны любому), параметры сетки и ECC — они нужны для
-чтения кадров.
+What is **not** hidden: the fact that an archive exists, its duration/size (video length
+and frame count are visible to anyone), grid and ECC parameters — they are needed to
+read the frames.
 
-## Сборка
+## Building
 
 ```bash
 cargo build --release            # Linux
-cargo test --release             #23 теста (+1 ignored — ручной диаг)
+cargo test --release             #23 tests (+1 ignored — manual diagnostics)
 cargo clippy --all-targets && cargo fmt --check
 ```
 
-**Windows-версия (кросс-сборка из Linux):**
+**Windows build (cross-compilation from Linux):**
 
 ```bash
-rustup target add x86_64-pc-windows-gnu   # std уже поставляется в тулчейн
+rustup target add x86_64-pc-windows-gnu   # std ships with the toolchain
 # mingw-w64: binutils-mingw-w64-x86-64, mingw-w64-x86-64-dev,
 #            gcc-mingw-w64-x86-64-posix (+base, +posix-runtime), mingw-w64-common
 cargo build --release --target x86_64-pc-windows-gnu
-# результат: target/x86_64-pc-windows-gnu/release/dmvpack.exe
+# result: target/x86_64-pc-windows-gnu/release/dmvpack.exe
 ```
 
-Готовые бинарники лежат в `dist/`: `dmvpack-linux-x86_64`, `dmvpack-windows-x86_64.exe`.
+Prebuilt binaries live in `dist/`: `dmvpack-linux-x86_64`, `dmvpack-windows-x86_64.exe`.
 
-## Структура кода
+## Code structure
 
-| Модуль | Что делает |
+| Module | What it does |
 |---|---|
-| `src/main.rs` | CLI (clap): подкоманды `pack` / `unpack` |
-| `src/frame.rs` | сетка ячеек, рендер кадра в байты и обратно |
-| `src/ecc.rs` | внешний RS между кадрами (reed-solomon-erasure) |
-| `src/inner.rs` | внутренний RS(255,239): encode/decode над GF(256) |
-| `src/audio.rs` | FSK-модуляция/демодуляция манифеста, комбинирование копий |
-| `src/manifest.rs` | бинарный формат манифеста (crc32 контента) |
-| `src/crypt.rs` | шифрование паролем: argon2id + chacha20-poly1305 |
-| `src/pack.rs`, `src/unpack.rs` | двухпроходный пакер / распаковка |
-| `src/ffmpeg.rs` | порождение процессов ffmpeg/ffprobe |
-| `examples/ber.rs`, `examples/diag.rs` | расчёт BER, диагностика повреждений |
+| `src/main.rs` | CLI (clap): `pack` / `unpack` subcommands |
+| `src/frame.rs` | cell grid, rendering a frame to bytes and back |
+| `src/ecc.rs` | outer RS between frames (reed-solomon-erasure) |
+| `src/inner.rs` | inner RS(255,239): encode/decode over GF(256) |
+| `src/audio.rs` | FSK modulation/demodulation of the manifest, combining copies |
+| `src/manifest.rs` | binary manifest format (crc32 of contents) |
+| `src/crypt.rs` | password encryption: argon2id + chacha20-poly1305 |
+| `src/pack.rs`, `src/unpack.rs` | two-pass packer / unpacker |
+| `src/ffmpeg.rs` | spawning ffmpeg/ffprobe processes |
+| `examples/ber.rs`, `examples/diag.rs` | BER calculation, damage diagnostics |
 
-## Отладочные переменные окружения
+## Debug environment variables
 
-- `DMVPACK_DEBUG` — ход поиска манифеста и выравнивания;
-- `DMVPACK_RS_DEBUG` — статистика внутреннего RS;
-- `DMVPACK_PASSWORD` — пароль для `-p` без значения (pack/unpack);
-- `DMVPACK_DIAG_PCM`, `DMVPACK_DIAG_REF` — сброс PCM/эталона для ручного теста `audio_damage`.
+- `DMVPACK_DEBUG` — manifest search and alignment trace;
+- `DMVPACK_RS_DEBUG` — inner RS statistics;
+- `DMVPACK_PASSWORD` — password for `-p` without a value (pack/unpack);
+- `DMVPACK_DIAG_PCM`, `DMVPACK_DIAG_REF` — dump PCM/reference for the manual
+  `audio_damage` test.
 
-## Ограничения
+## Limitations
 
-- аудио пережатое сильнее AAC ~48 kbps не читается;
-- ячейки должны оставаться различимыми после масштабирования (антиалиасинг/сжатие неубийственны,
-  но кроп или сильный апскейл с размытием ломают видеоуровень);
-- манифест в аудио — до 16 копий, минимум 2.
+- audio re-encoded harder than AAC ~48 kbps is not readable;
+- cells must stay distinguishable after scaling (anti-aliasing/compression are not fatal,
+  but cropping or a heavy blurry upscale breaks the video layer;
+- the manifest in audio — up to16 copies, at least2.
 
-## Автор
+## Author
 
 Vladimir Sirenko \<vmsirenko@gmail.com\>, Copyright 2026.
