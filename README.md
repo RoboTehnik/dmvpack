@@ -12,6 +12,10 @@ track, and the frames are protected by two levels of error correction.
 
 Pure Rust (no native dependencies) + external `ffmpeg`/`ffprobe` in PATH.
 
+A frame of `foxe.exe` packed into a video (snapshot, 1920×1080):
+
+![foxe.exe packed into a black-and-white Data Matrix video frame](docs/foxe-packed-snapshot.jpg)
+
 ## Based on Data Matrix
 
 Each frame is essentially one **Data Matrix** symbol, adapted for video:
