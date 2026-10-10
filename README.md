@@ -66,6 +66,13 @@ tiny archive (audio is never shorter than video). The demodulator first hard-fin
 preamble occurrences, then softly combines copies bit by bit (by energy sum), so
 re-encoded audio down to AAC ~48 kbps is read losslessly.
 
+**Why the manifest lives in the audio.** The manifest is needed *before* the payload can be
+assembled, and the video layer is the one that suffers from re-encoding — keeping the manifest
+in the cell grid would make it compete for bandwidth and let it die together with the data.
+Audio is an **independent channel**: video downscaling/cropping and audio resampling/re-encoding
+degrade separately, so combining copies recovers the manifest even at AAC ~48 kbps. A separate
+track is cheap (mono 48 kHz), allows up to16 copies, and its duration is deliberately ≥ the video.
+
 **6. mp4 assembly.** `ffmpeg`: video stream — `libx264` (default `--crf16 --preset medium`),
 audio — `aac --b:a 96k`. The audio is intentionally longer than the video — the track is
 not trimmed.
