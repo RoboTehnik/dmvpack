@@ -236,6 +236,26 @@ Prebuilt binaries live in `dist/`: `dmvpack-linux-x86_64`, `dmvpack-windows-x86_
   but cropping or a heavy blurry upscale breaks the video layer;
 - the manifest in audio — up to16 copies, at least2.
 
+## Related work / alternatives
+
+- **ytflies** ([Aperre/ytflies](https://github.com/Aperre/ytflies)) turns any file into an MP4 so it can
+  be uploaded to video hostings (YouTube, Vimeo, …). Unlike it, dmvpack does not just smuggle raw bytes
+  into frames: the data is drawn as a **Data Matrix** grid with a finder border, per-frame RS(255,239), an
+  outer (4+1) frame-RS level and an FSK-audio manifest — so it is built to survive the host's lossy
+  re-encoding instead of assuming the file stays intact.
+- **CryptoFrame** ([x011/CryptoFrame](https://github.com/x011/CryptoFrame)) embeds a short message in the
+  **least significant bits** of pixel colors (AES-256/RSA) and therefore **requires lossless codecs**
+  (FFV1/Huffyuv) — any lossy transcode destroys the payload. Unlike it, dmvpack conveys the archive in
+  high-contrast cell states with two ECC levels and keeps the manifest in the audio track, so x264
+  downscaling and AAC ~48 kbps still decode exactly.
+- **Classical steganography** — from LSB substitution and spread-spectrum watermarking (Cox et al., 1997)
+  to DCT/DWT-based video steganography — hides data in the carrier signal itself, which is either fragile
+  to compression (LSB) or trades capacity for robustness and typically carries only a short watermark.
+  Unlike them, dmvpack uses an explicit **Data Matrix symbol per frame instead of sample-level
+  (per-pixel / per-coefficient) encoding**, which gives a self-contained, error-corrected container: the
+  grid border provides alignment, and the two-level Reed–Solomon code recovers whole corrupted cells and
+  frames after lossy re-encoding.
+
 ## Author
 
 Vladimir Sirenko \<vmsirenko@gmail.com\>, Copyright 2026.
